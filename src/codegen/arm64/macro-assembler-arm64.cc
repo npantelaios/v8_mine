@@ -1596,6 +1596,18 @@ void TurboAssembler::AssertZeroExtended(Register int32_register) {
   Check(ls, AbortReason::k32BitValueInRegisterIsNotZeroExtended);
 }
 
+void MacroAssembler::AssertMap(Register object) {
+  if (!v8_flags.debug_code) return;
+  ASM_CODE_COMMENT(this);
+  AssertNotSmi(object, AbortReason::kOperandIsNotAMap);
+
+  UseScratchRegisterScope temps(this);
+  Register temp = temps.AcquireX();
+
+  CompareObjectType(object, temp, temp, MAP_TYPE);
+  Check(eq, AbortReason::kOperandIsNotAMap);
+}
+
 void MacroAssembler::AssertCode(Register object) {
   if (!v8_flags.debug_code) return;
   ASM_CODE_COMMENT(this);
@@ -2201,7 +2213,6 @@ void TurboAssembler::Call(Handle<Code> code, RelocInfo::Mode rmode) {
     return;
   }
 
-  DCHECK(FromCode(*code).IsExecutable());
   DCHECK(RelocInfo::IsCodeTarget(rmode));
 
   if (CanUseNearCallOrJump(rmode)) {

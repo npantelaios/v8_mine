@@ -1906,6 +1906,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 
   inline void JumpIfNotSmi(Register value, Label* not_smi_label);
 
+  // Abort execution if argument is not a Map, enabled via
+  // --debug-code.
+  void AssertMap(Register object) NOOP_UNLESS_DEBUG_CODE;
+
   // Abort execution if argument is not a Code, enabled via
   // --debug-code.
   void AssertCode(Register object) NOOP_UNLESS_DEBUG_CODE;
@@ -2246,6 +2250,12 @@ class V8_NODISCARD UseScratchRegisterScope {
     Exclude(list);
   }
   void ExcludeFP(const VRegister& reg) { ExcludeFP(CPURegList(reg)); }
+
+  CPURegList* Available() { return available_; }
+  void SetAvailable(const CPURegList& list) { *available_ = list; }
+
+  CPURegList* AvailableFP() { return availablefp_; }
+  void SetAvailableFP(const CPURegList& list) { *availablefp_ = list; }
 
  private:
   V8_EXPORT_PRIVATE static CPURegister AcquireNextAvailable(

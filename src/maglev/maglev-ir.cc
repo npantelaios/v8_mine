@@ -10,17 +10,11 @@
 #include "src/execution/isolate-inl.h"
 #include "src/heap/local-heap.h"
 #include "src/heap/parked-scope.h"
+#include "src/interpreter/bytecode-flags.h"
+#include "src/maglev/maglev-assembler-inl.h"
 #include "src/maglev/maglev-graph-labeller.h"
 #include "src/maglev/maglev-graph-processor.h"
 #include "src/maglev/maglev-ir-inl.h"
-
-#ifdef V8_TARGET_ARCH_ARM64
-#include "src/maglev/arm64/maglev-assembler-arm64-inl.h"
-#elif V8_TARGET_ARCH_X64
-#include "src/maglev/x64/maglev-assembler-x64-inl.h"
-#else
-#error "Maglev does not supported this architecture."
-#endif
 
 namespace v8 {
 namespace internal {
@@ -909,6 +903,19 @@ void LoadTaggedField::GenerateCode(MaglevAssembler* masm,
                          FieldMemOperand(object, offset()));
 }
 
+void LoadEnumCacheLength::SetValueLocationConstraints() {
+  UseRegister(map_input());
+  DefineAsRegister(this);
+}
+void LoadEnumCacheLength::GenerateCode(MaglevAssembler* masm,
+                                       const ProcessingState& state) {
+  Register map = ToRegister(map_input());
+  Register result_reg = ToRegister(result());
+  __ AssertMap(map);
+  __ LoadBitField<Map::Bits3::EnumLengthBits>(
+      result_reg, FieldMemOperand(map, Map::kBitField3Offset));
+}
+
 int LoadGlobal::MaxCallStackArgs() const {
   if (typeof_mode() == TypeofMode::kNotInside) {
     using D = CallInterfaceDescriptorFor<Builtin::kLoadGlobalIC>::type;
@@ -1486,9 +1493,10 @@ void GeneratorRestoreRegister::SetValueLocationConstraints() {
 }
 void GeneratorRestoreRegister::GenerateCode(MaglevAssembler* masm,
                                             const ProcessingState& state) {
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register temp = temps.Acquire();
   Register array = ToRegister(array_input());
   Register result_reg = ToRegister(result());
-  Register temp = general_temporaries().PopFirst();
 
   // The input and the output can alias, if that happen we use a temporary
   // register and a move at the end.
@@ -1499,7 +1507,7 @@ void GeneratorRestoreRegister::GenerateCode(MaglevAssembler* masm,
       value, FieldMemOperand(array, FixedArray::OffsetOfElementAt(index())));
 
   // And trashs it with StaleRegisterConstant.
-  Register scratch = general_temporaries().PopFirst();
+  Register scratch = temps.Acquire();
   __ LoadRoot(scratch, RootIndex::kStaleRegister);
   __ StoreTaggedField(
       FieldMemOperand(array, FixedArray::OffsetOfElementAt(index())), scratch);
@@ -1592,10 +1600,11 @@ void StringAt::SetValueLocationConstraints() {
 }
 void StringAt::GenerateCode(MaglevAssembler* masm,
                             const ProcessingState& state) {
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
   Register result_string = ToRegister(result());
   Register string = ToRegister(string_input());
   Register index = ToRegister(index_input());
-  Register scratch = general_temporaries().PopFirst();
   Register char_code = string;
 
   ZoneLabelRef done(masm);
@@ -1663,6 +1672,31 @@ void TestInstanceOf::GenerateCode(MaglevAssembler* masm,
   __ Move(D::GetRegisterParameter(D::kSlot), feedback().index());
   __ CallBuiltin(Builtin::kInstanceOf_WithFeedback);
   masm->DefineExceptionHandlerAndLazyDeoptPoint(this);
+}
+
+void TestTypeOf::SetValueLocationConstraints() {
+  UseRegister(value());
+  DefineAsRegister(this);
+}
+void TestTypeOf::GenerateCode(MaglevAssembler* masm,
+                              const ProcessingState& state) {
+  Register object = ToRegister(value());
+  // Use return register as temporary if needed. Be careful: {object} and
+  // {scratch} could alias (which means that {object} should be considered dead
+  // once {scratch} has been written to).
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  temps.Include(ToRegister(result()));
+
+  Label is_true, is_false, done;
+  __ TestTypeOf(object, literal_, &is_true, Label::kNear, true, &is_false,
+                Label::kNear, false);
+  // Fallthrough into true.
+  __ bind(&is_true);
+  __ LoadRoot(ToRegister(result()), RootIndex::kTrueValue);
+  __ Jump(&done, Label::kNear);
+  __ bind(&is_false);
+  __ LoadRoot(ToRegister(result()), RootIndex::kFalseValue);
+  __ bind(&done);
 }
 
 void ToBoolean::SetValueLocationConstraints() {
@@ -1929,7 +1963,8 @@ void CallKnownJSFunction::SetValueLocationConstraints() {
 
 void CallKnownJSFunction::GenerateCode(MaglevAssembler* masm,
                                        const ProcessingState& state) {
-  Register scratch = general_temporaries().PopFirst();
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
   int actual_parameter_count = num_args() + 1;
   if (actual_parameter_count < expected_parameter_count_) {
     int number_of_undefineds =
@@ -2383,8 +2418,9 @@ void JumpLoopPrologue::SetValueLocationConstraints() {
 void JumpLoopPrologue::GenerateCode(MaglevAssembler* masm,
                                     const ProcessingState& state) {
   if (!v8_flags.use_osr) return;
-  Register scratch0 = general_temporaries().PopFirst();
-  Register scratch1 = general_temporaries().PopFirst();
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch0 = temps.Acquire();
+  Register scratch1 = temps.Acquire();
 
   const Register osr_state = scratch1;
   __ Move(scratch0, unit_->feedback().object());
@@ -2477,13 +2513,27 @@ void BranchIfUndefinedOrNull::GenerateCode(MaglevAssembler* masm,
   }
 }
 
+void BranchIfTypeOf::SetValueLocationConstraints() {
+  UseRegister(value_input());
+  // One temporary for TestTypeOf.
+  set_temporaries_needed(1);
+}
+void BranchIfTypeOf::GenerateCode(MaglevAssembler* masm,
+                                  const ProcessingState& state) {
+  Register value = ToRegister(value_input());
+  __ TestTypeOf(value, literal_, if_true()->label(), Label::kFar,
+                if_true() == state.next_block(), if_false()->label(),
+                Label::kFar, if_false() == state.next_block());
+}
+
 void Switch::SetValueLocationConstraints() {
   UseAndClobberRegister(value());
   // TODO(victorgomes): Create a arch-agnostic scratch register scope.
   set_temporaries_needed(1);
 }
 void Switch::GenerateCode(MaglevAssembler* masm, const ProcessingState& state) {
-  Register scratch = general_temporaries().PopFirst();
+  MaglevAssembler::ScratchRegisterScope temps(masm);
+  Register scratch = temps.Acquire();
   std::unique_ptr<Label*[]> labels = std::make_unique<Label*[]>(size());
   for (int i = 0; i < size(); i++) {
     BasicBlock* block = (targets())[i].block_ptr();
@@ -2738,6 +2788,11 @@ void CallRuntime::PrintParams(std::ostream& os,
   os << "(" << Runtime::FunctionForId(function_id())->name << ")";
 }
 
+void TestTypeOf::PrintParams(std::ostream& os,
+                             MaglevGraphLabeller* graph_labeller) const {
+  os << "(" << interpreter::TestTypeOfFlags::ToString(literal_) << ")";
+}
+
 void IncreaseInterruptBudget::PrintParams(
     std::ostream& os, MaglevGraphLabeller* graph_labeller) const {
   os << "(" << amount() << ")";
@@ -2776,6 +2831,11 @@ void BranchIfInt32Compare::PrintParams(
 void BranchIfReferenceCompare::PrintParams(
     std::ostream& os, MaglevGraphLabeller* graph_labeller) const {
   os << "(" << operation_ << ")";
+}
+
+void BranchIfTypeOf::PrintParams(std::ostream& os,
+                                 MaglevGraphLabeller* graph_labeller) const {
+  os << "(" << interpreter::TestTypeOfFlags::ToString(literal_) << ")";
 }
 
 }  // namespace maglev

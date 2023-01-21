@@ -124,7 +124,7 @@ class PendingDependencies final {
     deps_[object] |= group;
   }
 
-  void InstallAll(Isolate* isolate, Handle<InstructionStream> code) {
+  void InstallAll(Isolate* isolate, Handle<Code> code) {
     if (V8_UNLIKELY(v8_flags.predictable)) {
       InstallAllPredictable(isolate, code);
       return;
@@ -139,7 +139,7 @@ class PendingDependencies final {
     }
   }
 
-  void InstallAllPredictable(Isolate* isolate, Handle<InstructionStream> code) {
+  void InstallAllPredictable(Isolate* isolate, Handle<Code> code) {
     CHECK(v8_flags.predictable);
     // First, guarantee predictable iteration order.
     using HandleAndGroup =
@@ -1189,7 +1189,7 @@ V8_INLINE void TraceInvalidCompilationDependency(
   PrintF("Compilation aborted due to invalid dependency: %s\n", d->ToString());
 }
 
-bool CompilationDependencies::Commit(Handle<InstructionStream> code) {
+bool CompilationDependencies::Commit(Handle<Code> code) {
   if (!PrepareInstall()) return false;
 
   {

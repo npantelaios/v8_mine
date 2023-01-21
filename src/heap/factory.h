@@ -941,11 +941,12 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
                 CodeKind kind);
 
     // Builds a new code object (fully initialized). All header fields of the
-    // returned object are immutable and the code object is write protected.
-    V8_WARN_UNUSED_RESULT Handle<InstructionStream> Build();
+    // associated InstructionStream are immutable and the InstructionStream
+    // object is write protected.
+    V8_WARN_UNUSED_RESULT Handle<Code> Build();
     // Like Build, builds a new code object. May return an empty handle if the
     // allocation fails.
-    V8_WARN_UNUSED_RESULT MaybeHandle<InstructionStream> TryBuild();
+    V8_WARN_UNUSED_RESULT MaybeHandle<Code> TryBuild();
 
     // Sets the self-reference object in which a reference to the code object is
     // stored. This allows generated code to reference its own InstructionStream
@@ -1006,12 +1007,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
       return *this;
     }
 
-    CodeBuilder& set_is_executable(bool executable) {
-      DCHECK_EQ(kind_, CodeKind::BUILTIN);
-      is_executable_ = executable;
-      return *this;
-    }
-
     CodeBuilder& set_kind_specific_flags(int32_t flags) {
       kind_specific_flags_ = flags;
       return *this;
@@ -1030,9 +1025,10 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
     inline bool CompiledWithConcurrentBaseline() const;
 
    private:
-    MaybeHandle<InstructionStream> BuildInternal(bool retry_allocation_or_fail);
-    MaybeHandle<InstructionStream> AllocateCode(bool retry_allocation_or_fail);
-    MaybeHandle<InstructionStream> AllocateConcurrentSparkplugCode(
+    MaybeHandle<Code> BuildInternal(bool retry_allocation_or_fail);
+    MaybeHandle<InstructionStream> AllocateInstructionStream(
+        bool retry_allocation_or_fail);
+    MaybeHandle<InstructionStream> AllocateConcurrentSparkplugInstructionStream(
         bool retry_allocation_or_fail);
 
     Isolate* const isolate_;
@@ -1052,7 +1048,6 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
         DeoptimizationData::Empty(isolate_);
     Handle<HeapObject> interpreter_data_;
     BasicBlockProfilerData* profiler_data_ = nullptr;
-    bool is_executable_ = true;
     bool is_turbofanned_ = false;
     int stack_slots_ = 0;
   };

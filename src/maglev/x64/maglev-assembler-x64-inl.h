@@ -38,6 +38,44 @@ constexpr Condition ConditionFor(Operation operation) {
   }
 }
 
+class MaglevAssembler::ScratchRegisterScope {
+ public:
+  explicit ScratchRegisterScope(MaglevAssembler* masm)
+      : masm_(masm),
+        prev_scope_(masm->scratch_register_scope_),
+        available_(masm->scratch_register_scope_
+                       ? masm_->scratch_register_scope_->available_
+                       : RegList()),
+        available_double_(
+            masm->scratch_register_scope_
+                ? masm_->scratch_register_scope_->available_double_
+                : DoubleRegList()) {
+    masm_->scratch_register_scope_ = this;
+  }
+  ~ScratchRegisterScope() { masm_->scratch_register_scope_ = prev_scope_; }
+
+  Register Acquire() { return available_.PopFirst(); }
+  void Include(Register reg) { available_.set(reg); }
+  void Include(const RegList list) { available_ = available_ | list; }
+
+  DoubleRegister AcquireDouble() { return available_double_.PopFirst(); }
+  void IncludeDouble(const DoubleRegList list) {
+    available_double_ = available_double_ | list;
+  }
+
+  RegList Available() { return available_; }
+  void SetAvailable(RegList list) { available_ = list; }
+
+  DoubleRegList AvailableDouble() { return available_double_; }
+  void SetAvailableDouble(DoubleRegList list) { available_double_ = list; }
+
+ private:
+  MaglevAssembler* masm_;
+  ScratchRegisterScope* prev_scope_;
+  RegList available_;
+  DoubleRegList available_double_;
+};
+
 namespace detail {
 
 template <typename... Args>
@@ -157,23 +195,6 @@ inline Condition MaglevAssembler::IsRootConstant(Input input,
     CompareRoot(ToMemOperand(input), root_index);
   }
   return equal;
-}
-
-void MaglevAssembler::Branch(Condition condition, BasicBlock* if_true,
-                             BasicBlock* if_false, BasicBlock* next_block) {
-  // We don't have any branch probability information, so try to jump
-  // over whatever the next block emitted is.
-  if (if_false == next_block) {
-    // Jump over the false block if true, otherwise fall through into it.
-    j(condition, if_true->label());
-  } else {
-    // Jump to the false block if true.
-    j(NegateCondition(condition), if_false->label());
-    // Jump to the true block if it's not the next block.
-    if (if_true != next_block) {
-      jmp(if_true->label());
-    }
-  }
 }
 
 inline MemOperand MaglevAssembler::GetStackSlot(
@@ -372,16 +393,20 @@ inline void MaglevAssembler::CompareInt32(Register src1, Register src2) {
   cmpl(src1, src2);
 }
 
-inline void MaglevAssembler::Jump(Label* target) { jmp(target); }
+inline void MaglevAssembler::Jump(Label* target, Label::Distance distance) {
+  jmp(target, distance);
+}
 
-inline void MaglevAssembler::JumpIf(Condition cond, Label* target) {
-  j(cond, target);
+inline void MaglevAssembler::JumpIf(Condition cond, Label* target,
+                                    Label::Distance distance) {
+  j(cond, target, distance);
 }
 
 inline void MaglevAssembler::JumpIfTaggedEqual(Register r1, Register r2,
-                                               Label* target) {
+                                               Label* target,
+                                               Label::Distance distance) {
   cmp_tagged(r1, r2);
-  j(equal, target);
+  j(equal, target, distance);
 }
 
 inline void MaglevAssembler::Pop(Register dst) { MacroAssembler::Pop(dst); }

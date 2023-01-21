@@ -172,6 +172,7 @@ class CompactInterpreterFrameState;
   V(LoadUnsignedIntTypedArrayElementNoDeopt) \
   V(LoadDoubleTypedArrayElement)             \
   V(LoadDoubleTypedArrayElementNoDeopt)      \
+  V(LoadEnumCacheLength)                     \
   V(LoadGlobal)                              \
   V(LoadNamedGeneric)                        \
   V(LoadNamedFromSuperGeneric)               \
@@ -198,6 +199,7 @@ class CompactInterpreterFrameState;
   V(ChangeUint32ToFloat64)                   \
   V(CheckedTruncateFloat64ToInt32)           \
   V(CheckedTruncateFloat64ToUint32)          \
+  V(TruncateNumberToInt32)                   \
   V(TruncateUint32ToInt32)                   \
   V(TruncateFloat64ToInt32)                  \
   V(Int32ToNumber)                           \
@@ -209,6 +211,7 @@ class CompactInterpreterFrameState;
   V(SetPendingMessage)                       \
   V(StringAt)                                \
   V(StringLength)                            \
+  V(FunctionLength)                          \
   V(ToBoolean)                               \
   V(ToBooleanLogicalNot)                     \
   V(TaggedEqual)                             \
@@ -274,7 +277,8 @@ class CompactInterpreterFrameState;
   V(BranchIfInt32Compare)           \
   V(BranchIfFloat64Compare)         \
   V(BranchIfUndefinedOrNull)        \
-  V(BranchIfJSReceiver)
+  V(BranchIfJSReceiver)             \
+  V(BranchIfTypeOf)
 
 #define CONDITIONAL_CONTROL_NODE_LIST(V) \
   V(Switch)                              \
@@ -2534,6 +2538,24 @@ class CheckedTruncateNumberToInt32
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
 };
 
+class TruncateNumberToInt32
+    : public FixedInputValueNodeT<1, TruncateNumberToInt32> {
+  using Base = FixedInputValueNodeT<1, TruncateNumberToInt32>;
+
+ public:
+  explicit TruncateNumberToInt32(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties = OpProperties::Int32();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  Input& input() { return Node::input(0); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 class LogicalNot : public FixedInputValueNodeT<1, LogicalNot> {
   using Base = FixedInputValueNodeT<1, LogicalNot>;
 
@@ -2691,7 +2713,7 @@ class TestTypeOf : public FixedInputValueNodeT<1, TestTypeOf> {
 
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
-  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
 
  private:
   interpreter::TestTypeOfFlags::LiteralFlag literal_;
@@ -4576,6 +4598,26 @@ class SetNamedGeneric : public FixedInputValueNodeT<3, SetNamedGeneric> {
   const compiler::FeedbackSource feedback_;
 };
 
+class LoadEnumCacheLength
+    : public FixedInputValueNodeT<1, LoadEnumCacheLength> {
+  using Base = FixedInputValueNodeT<1, LoadEnumCacheLength>;
+
+ public:
+  explicit LoadEnumCacheLength(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Reading() | OpProperties::Int32();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  static constexpr int kMapInput = 0;
+  Input& map_input() { return input(kMapInput); }
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
 class StringAt : public FixedInputValueNodeT<2, StringAt> {
   using Base = FixedInputValueNodeT<2, StringAt>;
 
@@ -4613,6 +4655,25 @@ class StringLength : public FixedInputValueNodeT<1, StringLength> {
   Input& object_input() { return input(kObjectIndex); }
 
   int MaxCallStackArgs() const;
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
+};
+
+class FunctionLength : public FixedInputValueNodeT<1, FunctionLength> {
+  using Base = FixedInputValueNodeT<1, FunctionLength>;
+
+ public:
+  explicit FunctionLength(uint64_t bitfield) : Base(bitfield) {}
+
+  static constexpr OpProperties kProperties =
+      OpProperties::Reading() | OpProperties::Int32();
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  static constexpr int kObjectIndex = 0;
+  Input& object_input() { return input(kObjectIndex); }
+
   void SetValueLocationConstraints();
   void GenerateCode(MaglevAssembler*, const ProcessingState&);
   void PrintParams(std::ostream&, MaglevGraphLabeller*) const {}
@@ -5935,6 +5996,30 @@ class BranchIfReferenceCompare
 
  private:
   Operation operation_;
+};
+
+class BranchIfTypeOf : public BranchControlNodeT<1, BranchIfTypeOf> {
+  using Base = BranchControlNodeT<1, BranchIfTypeOf>;
+
+ public:
+  static constexpr int kValueIndex = 0;
+  Input& value_input() { return NodeBase::input(kValueIndex); }
+
+  explicit BranchIfTypeOf(uint64_t bitfield,
+                          interpreter::TestTypeOfFlags::LiteralFlag literal,
+                          BasicBlockRef* if_true_refs,
+                          BasicBlockRef* if_false_refs)
+      : Base(bitfield, if_true_refs, if_false_refs), literal_(literal) {}
+
+  static constexpr
+      typename Base::InputTypes kInputTypes{ValueRepresentation::kTagged};
+
+  void SetValueLocationConstraints();
+  void GenerateCode(MaglevAssembler*, const ProcessingState&);
+  void PrintParams(std::ostream&, MaglevGraphLabeller*) const;
+
+ private:
+  interpreter::TestTypeOfFlags::LiteralFlag literal_;
 };
 
 }  // namespace maglev

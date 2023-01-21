@@ -376,6 +376,9 @@ size_t Heap::OldGenerationCapacity() {
        space = spaces.Next()) {
     total += space->Capacity();
   }
+  if (shared_lo_space_) {
+    total += shared_lo_space_->SizeOfObjects();
+  }
   return total + lo_space_->SizeOfObjects() + code_lo_space_->SizeOfObjects();
 }
 
@@ -387,6 +390,9 @@ size_t Heap::CommittedOldGenerationMemory() {
   for (PagedSpace* space = spaces.Next(); space != nullptr;
        space = spaces.Next()) {
     total += space->CommittedMemory();
+  }
+  if (shared_lo_space_) {
+    total += shared_lo_space_->Size();
   }
   return total + lo_space_->Size() + code_lo_space_->Size();
 }
@@ -1685,7 +1691,22 @@ bool Heap::CollectGarbage(AllocationSpace space,
     DevToolsTraceEventScope devtools_trace_event_scope(
         this, IsYoungGenerationCollector(collector) ? "MinorGC" : "MajorGC",
         GarbageCollectionReasonToString(gc_reason));
-    SaveStackContextScope stack_context_scope(&stack());
+
+    if (cpp_heap()) {
+      if (collector == GarbageCollector::MARK_COMPACTOR ||
+          (collector == GarbageCollector::MINOR_MARK_COMPACTOR &&
+           CppHeap::From(cpp_heap())->generational_gc_supported())) {
+        // CppHeap needs a stack marker at the top of all entry points to allow
+        // deterministic passes over the stack. E.g., a verifier that should
+        // only find a subset of references of the marker.
+        //
+        // TODO(chromium:1056170): Consider adding a component that keeps track
+        // of relevant GC stack regions where interesting pointers can be found.
+        static_cast<v8::internal::CppHeap*>(cpp_heap())
+            ->SetStackEndOfCurrentGC(
+                v8::base::Stack::GetCurrentStackPosition());
+      }
+    }
 
     GarbageCollectionPrologue(gc_reason, gc_callback_flags);
     {
@@ -1732,27 +1753,12 @@ bool Heap::CollectGarbage(AllocationSpace space,
     }
 
     if (collector == GarbageCollector::MARK_COMPACTOR) {
-      // Calculate used memory first, then committed memory. Following code
-      // assumes that committed >= used, which might not hold when this is
-      // calculated in the wrong order and background threads allocate
-      // in-between.
-      size_t used_memory_after = OldGenerationSizeOfObjects();
-      size_t committed_memory_after = CommittedOldGenerationMemory();
       if (memory_reducer_ != nullptr) {
-        MemoryReducer::Event event;
-        event.type = MemoryReducer::kMarkCompact;
-        event.time_ms = MonotonicallyIncreasingTimeInMs();
-        // Trigger one more GC if
-        // - this GC decreased committed memory,
-        // - there is high fragmentation,
-        event.next_gc_likely_to_collect_more =
-            (committed_memory_before > committed_memory_after + MB) ||
-            HasHighFragmentation(used_memory_after, committed_memory_after);
-        event.committed_memory = committed_memory_after;
-        memory_reducer_->NotifyMarkCompact(event);
+        memory_reducer_->NotifyMarkCompact(committed_memory_before);
       }
       if (initial_max_old_generation_size_ < max_old_generation_size() &&
-          used_memory_after < initial_max_old_generation_size_threshold_) {
+          OldGenerationSizeOfObjects() <
+              initial_max_old_generation_size_threshold_) {
         set_max_old_generation_size(initial_max_old_generation_size_);
       }
     }
@@ -1827,10 +1833,7 @@ int Heap::NotifyContextDisposed(bool dependant_context) {
     old_generation_size_configured_ = false;
     set_old_generation_allocation_limit(initial_old_generation_size_);
     if (memory_reducer_ != nullptr) {
-      MemoryReducer::Event event;
-      event.type = MemoryReducer::kPossibleGarbage;
-      event.time_ms = MonotonicallyIncreasingTimeInMs();
-      memory_reducer_->NotifyPossibleGarbage(event);
+      memory_reducer_->NotifyPossibleGarbage();
     }
   }
   isolate()->AbortConcurrentOptimization(BlockingBehavior::kDontBlock);
@@ -1956,10 +1959,7 @@ void Heap::StartIncrementalMarkingIfAllocationLimitIsReached(
         // This is a fallback case where no appropriate limits have been
         // configured yet.
         if (memory_reducer() != nullptr) {
-          MemoryReducer::Event event;
-          event.type = MemoryReducer::kPossibleGarbage;
-          event.time_ms = MonotonicallyIncreasingTimeInMs();
-          memory_reducer()->NotifyPossibleGarbage(event);
+          memory_reducer()->NotifyPossibleGarbage();
         }
         break;
       case IncrementalMarkingLimit::kNoLimit:
@@ -2396,8 +2396,6 @@ void Heap::PerformSharedGarbageCollection(Isolate* initiator,
   DCHECK(incremental_marking_->IsStopped());
   DCHECK_NOT_NULL(isolate()->global_safepoint());
 
-  SaveStackContextScope stack_context_scope(&stack());
-
   isolate()->global_safepoint()->IterateClientIsolates([](Isolate* client) {
     client->heap()->FreeSharedLinearAllocationAreas();
 
@@ -2476,8 +2474,6 @@ void Heap::RecomputeLimits(GarbageCollector collector) {
     return;
   }
 
-  const bool use_global_memory_scheduling = v8_flags.global_gc_scheduling;
-
   double v8_gc_speed =
       tracer()->CombinedMarkCompactSpeedInBytesPerMillisecond();
   double v8_mutator_speed =
@@ -2485,19 +2481,16 @@ void Heap::RecomputeLimits(GarbageCollector collector) {
   double v8_growing_factor = MemoryController<V8HeapTrait>::GrowingFactor(
       this, max_old_generation_size(), v8_gc_speed, v8_mutator_speed);
   double global_growing_factor = 0;
-  if (use_global_memory_scheduling) {
-    double embedder_gc_speed = tracer()->EmbedderSpeedInBytesPerMillisecond();
-    double embedder_speed =
-        tracer()->CurrentEmbedderAllocationThroughputInBytesPerMillisecond();
-    double embedder_growing_factor =
-        (embedder_gc_speed > 0 && embedder_speed > 0)
-            ? MemoryController<GlobalMemoryTrait>::GrowingFactor(
-                  this, max_global_memory_size_, embedder_gc_speed,
-                  embedder_speed)
-            : 0;
-    global_growing_factor =
-        std::max(v8_growing_factor, embedder_growing_factor);
-  }
+  double embedder_gc_speed = tracer()->EmbedderSpeedInBytesPerMillisecond();
+  double embedder_speed =
+      tracer()->CurrentEmbedderAllocationThroughputInBytesPerMillisecond();
+  double embedder_growing_factor =
+      (embedder_gc_speed > 0 && embedder_speed > 0)
+          ? MemoryController<GlobalMemoryTrait>::GrowingFactor(
+                this, max_global_memory_size_, embedder_gc_speed,
+                embedder_speed)
+          : 0;
+  global_growing_factor = std::max(v8_growing_factor, embedder_growing_factor);
 
   size_t old_gen_size = OldGenerationSizeOfObjects();
   size_t new_space_capacity = NewSpaceCapacity();
@@ -2511,14 +2504,12 @@ void Heap::RecomputeLimits(GarbageCollector collector) {
             this, old_gen_size, min_old_generation_size_,
             max_old_generation_size(), new_space_capacity, v8_growing_factor,
             mode));
-    if (use_global_memory_scheduling) {
-      DCHECK_GT(global_growing_factor, 0);
-      global_allocation_limit_ =
-          MemoryController<GlobalMemoryTrait>::CalculateAllocationLimit(
-              this, GlobalSizeOfObjects(), min_global_memory_size_,
-              max_global_memory_size_, new_space_capacity,
-              global_growing_factor, mode);
-    }
+    DCHECK_GT(global_growing_factor, 0);
+    global_allocation_limit_ =
+        MemoryController<GlobalMemoryTrait>::CalculateAllocationLimit(
+            this, GlobalSizeOfObjects(), min_global_memory_size_,
+            max_global_memory_size_, new_space_capacity, global_growing_factor,
+            mode);
     CheckIneffectiveMarkCompact(
         old_gen_size, tracer()->AverageMarkCompactMutatorUtilization());
   } else if (HasLowYoungGenerationAllocationRate() &&
@@ -2531,16 +2522,14 @@ void Heap::RecomputeLimits(GarbageCollector collector) {
     if (new_old_generation_limit < old_generation_allocation_limit()) {
       set_old_generation_allocation_limit(new_old_generation_limit);
     }
-    if (use_global_memory_scheduling) {
-      DCHECK_GT(global_growing_factor, 0);
-      size_t new_global_limit =
-          MemoryController<GlobalMemoryTrait>::CalculateAllocationLimit(
-              this, GlobalSizeOfObjects(), min_global_memory_size_,
-              max_global_memory_size_, new_space_capacity,
-              global_growing_factor, mode);
-      if (new_global_limit < global_allocation_limit_) {
-        global_allocation_limit_ = new_global_limit;
-      }
+    DCHECK_GT(global_growing_factor, 0);
+    size_t new_global_limit =
+        MemoryController<GlobalMemoryTrait>::CalculateAllocationLimit(
+            this, GlobalSizeOfObjects(), min_global_memory_size_,
+            max_global_memory_size_, new_space_capacity, global_growing_factor,
+            mode);
+    if (new_global_limit < global_allocation_limit_) {
+      global_allocation_limit_ = new_global_limit;
     }
   }
 }
@@ -3134,14 +3123,12 @@ void Heap::ConfigureInitialOldGenerationSize() {
     } else {
       old_generation_size_configured_ = true;
     }
-    if (v8_flags.global_gc_scheduling) {
-      const size_t new_global_memory_limit = std::max(
-          GlobalSizeOfObjects() + minimum_growing_step,
-          static_cast<size_t>(static_cast<double>(global_allocation_limit_) *
-                              (tracer()->AverageSurvivalRatio() / 100)));
-      if (new_global_memory_limit < global_allocation_limit_) {
-        global_allocation_limit_ = new_global_memory_limit;
-      }
+    const size_t new_global_memory_limit = std::max(
+        GlobalSizeOfObjects() + minimum_growing_step,
+        static_cast<size_t>(static_cast<double>(global_allocation_limit_) *
+                            (tracer()->AverageSurvivalRatio() / 100)));
+    if (new_global_memory_limit < global_allocation_limit_) {
+      global_allocation_limit_ = new_global_memory_limit;
     }
   }
 }
@@ -3702,8 +3689,6 @@ bool Heap::HasLowOldGenerationAllocationRate() {
 }
 
 bool Heap::HasLowEmbedderAllocationRate() {
-  if (!v8_flags.global_gc_scheduling) return true;
-
   double mu = ComputeMutatorUtilization(
       "Embedder",
       tracer()->CurrentEmbedderAllocationThroughputInBytesPerMillisecond(),
@@ -3747,16 +3732,17 @@ void Heap::CheckIneffectiveMarkCompact(size_t old_generation_size,
 }
 
 bool Heap::HasHighFragmentation() {
-  size_t used = OldGenerationSizeOfObjects();
-  size_t committed = CommittedOldGenerationMemory();
-  return HasHighFragmentation(used, committed);
-}
+  const size_t used = OldGenerationSizeOfObjects();
+  const size_t committed = CommittedOldGenerationMemory();
 
-bool Heap::HasHighFragmentation(size_t used, size_t committed) {
-  const size_t kSlack = 16 * MB;
+  // Background thread allocation could result in committed memory being less
+  // than used memory in some situations.
+  if (committed < used) return false;
+
+  constexpr size_t kSlack = 16 * MB;
+
   // Fragmentation is high if committed > 2 * used + kSlack.
   // Rewrite the expression to avoid overflow.
-  DCHECK_GE(committed, used);
   return committed - used > used + kSlack;
 }
 
@@ -3776,10 +3762,7 @@ void Heap::ActivateMemoryReducerIfNeeded() {
   const int kMinCommittedMemory = 7 * Page::kPageSize;
   if (ms_count_ == 0 && CommittedMemory() > kMinCommittedMemory &&
       isolate()->IsIsolateInBackground()) {
-    MemoryReducer::Event event;
-    event.type = MemoryReducer::kPossibleGarbage;
-    event.time_ms = MonotonicallyIncreasingTimeInMs();
-    memory_reducer_->NotifyPossibleGarbage(event);
+    memory_reducer_->NotifyPossibleGarbage();
   }
 }
 
@@ -4519,10 +4502,11 @@ void Heap::ZapCodeObject(Address start_address, int size_in_bytes) {
 #endif
 }
 
-void Heap::RegisterCodeObject(Handle<InstructionStream> code) {
-  Address addr = code->address();
+void Heap::RegisterCodeObject(Handle<Code> code) {
+  InstructionStream istream = code->instruction_stream();
+  Address addr = istream.address();
   if (!V8_ENABLE_THIRD_PARTY_HEAP_BOOL && code_space()->Contains(addr)) {
-    MemoryChunk::FromHeapObject(*code)
+    MemoryChunk::FromHeapObject(istream)
         ->GetCodeObjectRegistry()
         ->RegisterNewlyAllocatedCodeObject(addr);
   }
@@ -5132,6 +5116,9 @@ size_t Heap::OldGenerationSizeOfObjects() {
        space = spaces.Next()) {
     total += space->SizeOfObjects();
   }
+  if (shared_lo_space_) {
+    total += shared_lo_space_->SizeOfObjects();
+  }
   return total + lo_space_->SizeOfObjects() + code_lo_space_->SizeOfObjects();
 }
 
@@ -5267,8 +5254,6 @@ Heap::HeapGrowingMode Heap::CurrentHeapGrowingMode() {
 }
 
 base::Optional<size_t> Heap::GlobalMemoryAvailable() {
-  if (!v8_flags.global_gc_scheduling) return {};
-
   size_t global_size = GlobalSizeOfObjects();
 
   if (global_size < global_allocation_limit_)
@@ -5791,10 +5776,7 @@ void Heap::NotifyOldGenerationExpansion(AllocationSpace space,
       OldGenerationCapacity() >= old_generation_capacity_after_bootstrap_ +
                                      kMemoryReducerActivationThreshold &&
       v8_flags.memory_reducer_for_small_heaps) {
-    MemoryReducer::Event event;
-    event.type = MemoryReducer::kPossibleGarbage;
-    event.time_ms = MonotonicallyIncreasingTimeInMs();
-    memory_reducer()->NotifyPossibleGarbage(event);
+    memory_reducer()->NotifyPossibleGarbage();
   }
 }
 
@@ -5823,7 +5805,12 @@ const cppgc::EmbedderStackState* Heap::overriden_stack_state() const {
 }
 
 void Heap::SetStackStart(void* stack_start) {
-  stack().SetStackStart(stack_start);
+#if V8_ENABLE_WEBASSEMBLY
+  stack().SetStackStart(stack_start,
+                        v8_flags.experimental_wasm_stack_switching);
+#else
+  stack().SetStackStart(stack_start, false);
+#endif  // V8_ENABLE_WEBASSEMBLY
 }
 
 ::heap::base::Stack& Heap::stack() {
@@ -6405,8 +6392,7 @@ HeapObjectIterator::HeapObjectIterator(
       filtering_(filtering),
       filter_(nullptr),
       space_iterator_(nullptr),
-      object_iterator_(nullptr),
-      stack_context_scope_(&heap->stack()) {
+      object_iterator_(nullptr) {
   heap_->MakeHeapIterable();
   // Start the iteration.
   space_iterator_ = new SpaceIterator(heap_);
@@ -7384,29 +7370,6 @@ CppClassNamesAsHeapObjectNameScope::CppClassNamesAsHeapObjectNameScope(
 
 CppClassNamesAsHeapObjectNameScope::~CppClassNamesAsHeapObjectNameScope() =
     default;
-
-SaveStackContextScope::SaveStackContextScope(::heap::base::Stack* stack)
-    : stack_(stack) {
-#if V8_ENABLE_WEBASSEMBLY
-  // TODO(v8:13493): Do not check the stack context invariant if WASM stack
-  // switching is enabled. This will be removed as soon as context saving
-  // becomes compatible with stack switching.
-  stack_->SaveContext(!v8_flags.experimental_wasm_stack_switching);
-#else
-  stack_->SaveContext();
-#endif  // V8_ENABLE_WEBASSEMBLY
-}
-
-SaveStackContextScope::~SaveStackContextScope() {
-#if V8_ENABLE_WEBASSEMBLY
-  // TODO(v8:13493): Do not check the stack context invariant if WASM stack
-  // switching is enabled. This will be removed as soon as context saving
-  // becomes compatible with stack switching.
-  stack_->ClearContext(!v8_flags.experimental_wasm_stack_switching);
-#else
-  stack_->ClearContext();
-#endif  // V8_ENABLE_WEBASSEMBLY
-}
 
 }  // namespace internal
 }  // namespace v8
