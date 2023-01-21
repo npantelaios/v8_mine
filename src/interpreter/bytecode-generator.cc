@@ -1720,6 +1720,7 @@ void BytecodeGenerator::VisitExpressionStatement(ExpressionStatement* stmt) {
 void BytecodeGenerator::VisitEmptyStatement(EmptyStatement* stmt) {}
 
 void BytecodeGenerator::VisitIfStatement(IfStatement* stmt) {
+  console.log("AAAAAAAAAAAAAAAAAAAAAAAAAAA");
   ConditionalControlFlowBuilder conditional_builder(
       builder(), block_coverage_builder_, stmt);
   builder()->SetStatementPosition(stmt);
@@ -3169,21 +3170,21 @@ void BytecodeGenerator::VisitObjectLiteral(ObjectLiteral* expr) {
     }
   }
 
-    // Define accessors, using only a single call to the runtime for each pair
-    // of corresponding getters and setters.
-    object_literal_context_scope.SetEnteredIf(true);
-    for (auto accessors : accessor_table.ordered_accessors()) {
-      RegisterAllocationScope inner_register_scope(this);
-      RegisterList args = register_allocator()->NewRegisterList(5);
-      builder()->MoveRegister(literal, args[0]);
-      VisitForRegisterValue(accessors.first, args[1]);
-      VisitLiteralAccessor(accessors.second->getter, args[2]);
-      VisitLiteralAccessor(accessors.second->setter, args[3]);
-      builder()
-          ->LoadLiteral(Smi::FromInt(NONE))
-          .StoreAccumulatorInRegister(args[4])
-          .CallRuntime(Runtime::kDefineAccessorPropertyUnchecked, args);
-    }
+  // Define accessors, using only a single call to the runtime for each pair
+  // of corresponding getters and setters.
+  object_literal_context_scope.SetEnteredIf(true);
+  for (auto accessors : accessor_table.ordered_accessors()) {
+    RegisterAllocationScope inner_register_scope(this);
+    RegisterList args = register_allocator()->NewRegisterList(5);
+    builder()->MoveRegister(literal, args[0]);
+    VisitForRegisterValue(accessors.first, args[1]);
+    VisitLiteralAccessor(accessors.second->getter, args[2]);
+    VisitLiteralAccessor(accessors.second->setter, args[3]);
+    builder()
+        ->LoadLiteral(Smi::FromInt(NONE))
+        .StoreAccumulatorInRegister(args[4])
+        .CallRuntime(Runtime::kDefineAccessorPropertyUnchecked, args);
+  }
 
   // Object literals have two parts. The "static" part on the left contains no
   // computed property names, and so we can compute its map ahead of time; see
