@@ -111,3 +111,4 @@ bazel-bin
 bazel-out
 bazel-testlogs
 bazel-v8
+/src/out/x64.debug/mksnapshot
