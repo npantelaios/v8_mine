@@ -1720,7 +1720,8 @@ void BytecodeGenerator::VisitExpressionStatement(ExpressionStatement* stmt) {
 void BytecodeGenerator::VisitEmptyStatement(EmptyStatement* stmt) {}
 
 void BytecodeGenerator::VisitIfStatement(IfStatement* stmt) {
-  console.log("AAAAAAAAAAAAAAAAAAAAAAAAAAA");
+  printf("BBBBBBBBBBBBBBBB");
+  printf("CCCCCCCCCCCCCCCC");
   ConditionalControlFlowBuilder conditional_builder(
       builder(), block_coverage_builder_, stmt);
   builder()->SetStatementPosition(stmt);
